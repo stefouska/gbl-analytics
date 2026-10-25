@@ -1,0 +1,6 @@
+{
+  "gbl_2024": "FAILED: GBL: no teams found in the ranking table (HTML saved in data/gbl/raw/_debug)",
+  "gbl_2025": "FAILED: GBL: no teams found in the ranking table (HTML saved in data/gbl/raw/_debug)",
+  "gbl_2026": "FAILED: cannot convert float NaN to integer",
+  "_run_at": "2026-10-25T17:16+00:00"
+}
