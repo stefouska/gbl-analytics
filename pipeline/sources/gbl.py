@@ -60,6 +60,7 @@ def _get(session, url, params=None, tries=3) -> str:
             r = session.get(url, params=params, headers=UA, timeout=30)
             if r.ok:
                 time.sleep(0.4)                       # be gentle with their server
+                r.encoding = "utf-8"                  # no charset in the header; the pages are UTF-8
                 return r.text
         except requests.RequestException:
             pass
@@ -98,16 +99,34 @@ def championship_id(session, season: int) -> str:
     raise RuntimeError(f"GBL: could not find the championship id of {label}")
 
 
+def _last_day(soup) -> str | None:
+    """The latest round in the ranking page's round list (values like '26-1')."""
+    sel = soup.find("select", id="day") or soup.find("select", attrs={"name": "day"})
+    vals = [o.get("value", "").strip() for o in (sel.find_all("option") if sel else [])]
+    vals = [v for v in vals if re.fullmatch(r"\d{1,2}-\d+", v)]
+    return vals[-1] if vals else None
+
+
 def teams(session, cid: str) -> dict:
-    """{team id: name} from the ranking table of the season (navigation links outside tables are ignored)."""
+    """{team id: name} from the ranking table of the season. esake.gr shows the table only when a round is chosen,
+    so the page is read once for its list of rounds and again with the latest one."""
     html = _get(session, f"{BASE}/EsakeRanking", {"idchampionship": cid})
     soup = BeautifulSoup(html, "html.parser")
+    day = _last_day(soup)
+    if day:
+        html = _get(session, f"{BASE}/EsakeRanking", {"idchampionship": cid, "day": day})
+        soup = BeautifulSoup(html, "html.parser")
     out = {}
     for table in soup.find_all("table"):
         for a in table.find_all("a", href=True):
             tid = _param(a["href"], "idteam")
             if tid:
                 out[tid] = re.sub(r"^\d+\s*", "", a.get_text(" ", strip=True))
+    if not out:                                   # last resort: the club bar at the top (current season's clubs)
+        for a in soup.select(".teams-bar a[href], .teams-bar-mobile a[href]"):
+            tid = _param(a["href"], "idteam")
+            if tid:
+                out[tid] = a.get("title") or a.get_text(" ", strip=True)
     if not out:
         _debug(f"ranking_{cid}", html)
     return out
@@ -154,7 +173,7 @@ def program(session, cid: str, tid: str, season: int, idseason: str) -> list[dic
 
 
 def _round_number(label: str):
-    m = re.match(r"\s*(\d{1,2})\b", label or "")
+    m = re.match(r"\s*(\d{1,2})(?!\d)", label or "")
     return int(m.group(1)) if m else None
 
 
@@ -292,7 +311,8 @@ def fetch(season: int, full: bool = False) -> pd.DataFrame:
         raise RuntimeError("GBL: no games found in the team programs (HTML saved in data/gbl/raw/_debug)")
     sched = pd.DataFrame(games.values())
     sched["round"] = sched.round_label.map(_round_number)
-    rs_max = int(sched.loc[sched.phase == "RS", "round"].max() or 0)
+    rs_max = sched.loc[sched.phase == "RS", "round"].max()
+    rs_max = int(rs_max) if rs_max == rs_max and rs_max is not None else 0
     po = sched.phase == "PO"                                 # playoffs continue the round numbering by date
     if po.any():
         sched.loc[po, "round"] = rs_max + sched.loc[po, "date"].rank(method="dense").astype(int)
