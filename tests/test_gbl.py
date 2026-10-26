@@ -8,7 +8,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
-PAGES = ("dashboard", "players", "teams", "season_compare", "game_preview")
+PAGES = ("dashboard", "players", "teams", "season_compare", "game_preview", "compare", "good_form", "bad_form")
 
 
 def test_gbl_end_to_end(tmp_path, monkeypatch):

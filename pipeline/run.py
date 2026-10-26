@@ -25,6 +25,14 @@ def main(full_history: bool = False):
     for s in SEASONS:              # the current season every day; a season never downloaded, once in full
         if full_history or s == CURRENT_SEASON or not (RAW / f"boxscores_{s}.parquet").exists():
             step(f"gbl_{s}", gbl.fetch, s, full_history)
+    for s in SEASONS:              # seasons not read today: fix club names still shown as codes
+        sf = RAW / f"schedule_{s}.parquet"
+        if f"gbl_{s}" not in status and sf.exists():
+            import pandas as pd
+            sc = pd.read_parquet(sf)
+            if (sc.hometeam.astype(str).str.startswith("Team ").any()
+                    or sc.awayteam.astype(str).str.startswith("Team ").any()):
+                step(f"gbl_names_{s}", gbl.refresh_names, s)
     if list(RAW.glob("boxscores_*.parquet")):
         step("build", lambda: build.main() or [])
     status["_run_at"] = datetime.now(timezone.utc).isoformat(timespec="minutes")

@@ -297,7 +297,10 @@ def player_board(games: pd.DataFrame, season: int, as_of_round: int) -> pd.DataF
     else:
         b["matchup_factor"] = 1.0
         b["exp_fp_3"], b["games_3"] = np.nan, 0
-    b["exp_fp_next"] = b.exp_fp_next.fillna((b.exp_fp_base * avail).clip(lower=0).round(1))
+    if "exp_fp_next" not in b:                       # no upcoming games in the schedule
+        b["exp_fp_next"] = np.nan
+    b["exp_fp_next"] = pd.to_numeric(b.exp_fp_next, errors="coerce")
+    b["exp_fp_next"] = pd.to_numeric(b.exp_fp_next.fillna((b.exp_fp_base * avail).clip(lower=0).round(1)), errors="coerce")
 
     # --- market: expected price move after the next game, fair price (price at which he would stop moving)
     move = ((b.exp_fp_next - b.break_even) / 25).round(1)

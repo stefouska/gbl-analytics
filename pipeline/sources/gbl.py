@@ -42,8 +42,19 @@ TEAM_TAGS = [("ΟΛΥΜΠΙΑΚΟΣ", "OLY", "Olympiacos"), ("ΠΑΝΑΘΗΝΑ",
              ("ΚΟΛΟΣΣΟΣ", "KOL", "Kolossos Rodou"), ("ΜΑΡΟΥΣΙ", "MAR", "Maroussi"),
              ("ΚΑΡΔΙΤΣΑ", "KAR", "Karditsa"), ("ΗΡΑΚΛΗΣ", "HER", "Iraklis"), ("ΜΥΚΟΝΟΣ", "MYK", "Mykonos"),
              ("ΠΑΝΙΩΝΙΟΣ", "PANI", "Panionios"), ("ΛΕΥΚΑΔΑΣ", "LEF", "Doxa Lefkadas"),
-             ("FALCONS", "FAL", "Vikos Falcons"), ("ΛΑΥΡΙΟ", "LAV", "Lavrio"), ("ΙΩΝΙΚΟΣ", "ION", "Ionikos"),
+             ("FALCONS", "FAL", "Vikos Falcons"), ("ΦALCONS", "FAL", "Vikos Falcons"), ("ΛΑΥΡΙΟ", "LAV", "Lavrio"), ("ΙΩΝΙΚΟΣ", "ION", "Ionikos"),
              ("ΑΠΟΛΛΩΝ", "APO", "Apollon Patras"), ("ΨΥΧΙΚΟ", "PSY", "Psychiko")]
+
+
+GR2LAT = dict(zip("ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩΆΈΉΊΌΎΏΪΫ",
+                  ["A", "V", "G", "D", "E", "Z", "I", "TH", "I", "K", "L", "M", "N", "X", "O", "P", "R", "S", "T", "Y",
+                   "F", "CH", "PS", "O", "A", "E", "I", "I", "O", "Y", "O", "I", "Y"]))
+
+
+def latin(name: str) -> str:
+    """'ΚΟΛΟΣΣΟΣ H HOTELS COLLECTION' -> 'Kolossos H Hotels Collection'."""
+    up = (name or "").upper()
+    return "".join(GR2LAT.get(ch, ch) for ch in up).title().replace("Bc", "BC")
 
 
 def team_tag(name: str, code: str) -> tuple[str, str]:
@@ -51,7 +62,10 @@ def team_tag(name: str, code: str) -> tuple[str, str]:
     for key, tag, nice in TEAM_TAGS:
         if key in up:
             return tag, nice
-    return code[-4:], (name or code).title()
+    if name and not re.fullmatch(r"[0-9A-F]{6,12}", up):
+        nice = latin(name)
+        return re.sub(r"[^A-Z]", "", nice.upper())[:4] or code[-4:], nice
+    return code[-4:], f"Team {code}"
 
 
 def _get(session, url, params=None, tries=3) -> str:
@@ -116,6 +130,7 @@ def teams(session, cid: str) -> dict:
     if day:
         html = _get(session, f"{BASE}/EsakeRanking", {"idchampionship": cid, "day": day})
         soup = BeautifulSoup(html, "html.parser")
+        save_sample(f"ranking_{cid}", html)
     out = {}
     for table in soup.find_all("table"):
         for a in table.find_all("a", href=True):
@@ -259,6 +274,8 @@ POS_WORDS = {"G": ("GUARD", "ΓΚΑΡΝΤ", "ΠΟΪΝΤ", "ΠΟΙΝΤ", "ΣΟΥ�
 
 def roster(session, cid: str, tid: str, season: int) -> list[dict]:
     html = _get(session, f"{BASE}/EsaketeamView", {"idteam": tid, "mode": 1, "idchampionship": cid})
+    if not (SAMPLES / "team_mode1.html").exists():
+        save_sample("team_mode1", html)
     soup = BeautifulSoup(html, "html.parser")
     out = {}
     for a in soup.find_all("a", href=True):
@@ -277,6 +294,60 @@ def roster(session, cid: str, tid: str, season: int) -> list[dict]:
     return list(out.values())
 
 
+# ------------------------------------------------------------------ team names
+def name_map(box: pd.DataFrame, sched: pd.DataFrame, members: dict, tms: dict) -> dict:
+    """{box-score team id: club name}. A box-score team id is matched to the club (ranking id) whose program
+    contains most of its games; ids that already are ranking ids keep their own name."""
+    if box is None or box.empty or not members:
+        return {}
+    gid = dict(zip(sched.gamecode, sched.esake_id))
+    out = {}
+    for code, g in box.drop_duplicates(["Gamecode", "Team"]).groupby("Team"):
+        if code in tms:
+            out[code] = tms[code]
+            continue
+        votes = {}
+        for gc in g.Gamecode:
+            for tid in members.get(gid.get(gc), ()):
+                votes[tid] = votes.get(tid, 0) + 1
+        if votes:
+            best = max(votes, key=votes.get)
+            if votes[best] >= max(1, 0.6 * len(g)):
+                out[code] = tms.get(best, best)
+    return out
+
+
+def refresh_names(season: int) -> pd.DataFrame:
+    """Re-name the clubs of a season already downloaded (cheap: the ranking and the clubs' programs only)."""
+    sf, bf = RAW / f"schedule_{season}.parquet", RAW / f"boxscores_{season}.parquet"
+    if not sf.exists() or not bf.exists():
+        return pd.DataFrame()
+    s = requests.Session()
+    cid = championship_id(s, season)
+    tms = teams(s, cid)
+    members = {}
+    for tid in tms:
+        for idseason in PHASES:
+            try:
+                for g in program(s, cid, tid, season, idseason):
+                    members.setdefault(g["esake_id"], set()).add(tid)
+            except RuntimeError:
+                pass
+    ids = pd.read_parquet(RAW / f"game_ids_{season}.parquet")
+    sched = pd.DataFrame({"esake_id": ids.esake_id, "gamecode": ids.gamecode})
+    names = name_map(pd.read_parquet(bf), sched, members, tms)
+    sc = pd.read_parquet(sf)
+    for side in ("home", "away"):
+        tags = [team_tag(names.get(c) or tms.get(c, c), c) for c in sc[f"{side}code"]]
+        sc[f"{side}tv"] = [t for t, _ in tags]
+        sc[f"{side}team"] = [n for _, n in tags]
+    sc.to_parquet(sf, index=False)
+    pd.DataFrame({"club_code": list(names), "team_name": list(names.values())}) \
+        .to_parquet(RAW / f"team_names_{season}.parquet", index=False)
+    print(f"GBL {season}-{str(season + 1)[-2:]}: names of {len(names)} clubs refreshed", flush=True)
+    return sc
+
+
 # ------------------------------------------------------------------ main
 def _ids(season: int, esake_ids: list[str]) -> dict:
     """esake hex id -> integer game code, stable between runs (new games get the next numbers)."""
@@ -291,20 +362,43 @@ def _ids(season: int, esake_ids: list[str]) -> dict:
     return known
 
 
+SAMPLES = RAW / "_samples"
+
+
+def meta(season: int) -> pd.DataFrame:
+    """Cheap: the season's clubs (ranking id -> name), saved as teams_{season}.parquet."""
+    RAW.mkdir(parents=True, exist_ok=True)
+    s = requests.Session()
+    tms = teams(s, championship_id(s, season))
+    out = pd.DataFrame([{"season": season, "rank_id": k, "name": v} for k, v in tms.items()])
+    if len(out):
+        out.to_parquet(RAW / f"teams_{season}.parquet", index=False)
+    return out
+
+
+def save_sample(name: str, html: str):
+    SAMPLES.mkdir(parents=True, exist_ok=True)
+    (SAMPLES / f"{name}.html").write_text(html, encoding="utf-8")
+
+
 def fetch(season: int, full: bool = False) -> pd.DataFrame:
     RAW.mkdir(parents=True, exist_ok=True)
     s = requests.Session()
     cid = championship_id(s, season)
     tms = teams(s, cid)
+    if tms:
+        pd.DataFrame([{"season": season, "rank_id": k, "name": v} for k, v in tms.items()]) \
+            .to_parquet(RAW / f"teams_{season}.parquet", index=False)
     if not tms:
         raise RuntimeError("GBL: no teams found in the ranking table (HTML saved in data/gbl/raw/_debug)")
     # 1. every game of the season from the teams' programs
-    games = {}
+    games, members = {}, {}
     for tid in tms:
         for idseason in PHASES:
             try:
                 for g in program(s, cid, tid, season, idseason):
                     games.setdefault(g["esake_id"], g)
+                    members.setdefault(g["esake_id"], set()).add(tid)    # which clubs' programs list the game
             except RuntimeError:
                 pass
     if not games:
@@ -339,6 +433,12 @@ def fetch(season: int, full: bool = False) -> pd.DataFrame:
             if not failed:
                 _debug(f"game_{g.esake_id}", html)
             continue
+        if not (SAMPLES / "game_mode3.html").exists() or g.Index == todo.index[-1]:
+            save_sample("game_mode3", html)            # one real box-score page, to check the parser
+            try:
+                save_sample("game_mode1", _get(s, f"{BASE}/EsakegameView", {"idgame": g.esake_id, "mode": 1}))
+            except RuntimeError:
+                pass
         df = pd.DataFrame(rows)
         tot = df[df._kind == "total"].set_index("_team").Points
         if len(tot) != 2 or tot.sum() == 0:
@@ -358,6 +458,11 @@ def fetch(season: int, full: bool = False) -> pd.DataFrame:
     else:
         out = old
 
+    # names: the box scores use their own team ids; a box-score team is the club whose program lists its games
+    names = name_map(out, sched, members, tms)
+    pd.DataFrame({"club_code": list(names), "team_name": list(names.values())}) \
+        .to_parquet(RAW / f"team_names_{season}.parquet", index=False)
+
     # 3. schedule in the EuroLeague format (home/away from the box score; unknown for games not played)
     sf = RAW / f"schedule_{season}.parquet"
     prev = pd.read_parquet(sf) if sf.exists() else pd.DataFrame()
@@ -373,7 +478,7 @@ def fetch(season: int, full: bool = False) -> pd.DataFrame:
                 a = gb[gb.Home == 0].Team.iloc[0]
         if h is None:
             continue                                        # opponent not known yet (filled once played)
-        (ht, hn), (at, an) = team_tag(tms.get(h, h), h), team_tag(tms.get(a, a), a)
+        (ht, hn), (at, an) = team_tag(names.get(h) or tms.get(h, h), h), team_tag(names.get(a) or tms.get(a, a), a)
         rows.append({"season": season, "gameday": int(g.round), "round": g.round_label,
                      "gamecode": f"E{season}_{g.gamecode}", "date": str(g.date) if g.date else None,
                      "startime": g.time, "homecode": h, "hometv": ht, "hometeam": hn,
